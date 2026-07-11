@@ -88,10 +88,6 @@ const AIRBNB_SEARCH_TOOL: Tool = {
         enum: ["entire_home", "private_room", "shared_room", "hotel_room"],
         description: "Filter by property type: 'entire_home' (entire homes/apartments), 'private_room' (private rooms in shared homes), 'shared_room' (shared/dorm-style rooms), 'hotel_room' (hotel rooms)"
       },
-      ignoreRobotsText: {
-        type: "boolean",
-        description: "Ignore robots.txt rules for this request"
-      }
     },
     required: ["location"]
   }
@@ -131,10 +127,6 @@ const AIRBNB_LISTING_DETAILS_TOOL: Tool = {
         type: "number",
         description: "Number of pets"
       },
-      ignoreRobotsText: {
-        type: "boolean",
-        description: "Ignore robots.txt rules for this request"
-      }
     },
     required: ["id"]
   }
@@ -148,6 +140,29 @@ const AIRBNB_TOOLS = [
 // Utility functions
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const BASE_URL = "https://www.airbnb.com";
+const configuredMaxResponseBytes = Number.parseInt(process.env.MAX_RESPONSE_BYTES || "2000000", 10);
+const MAX_RESPONSE_BYTES = Number.isSafeInteger(configuredMaxResponseBytes) && configuredMaxResponseBytes > 0
+  ? configuredMaxResponseBytes
+  : 2000000;
+
+type RobotsPolicyStatus = "uninitialized" | "available" | "unavailable";
+let robotsPolicyStatus: RobotsPolicyStatus = "uninitialized";
+
+function requireNonEmptyString(value: unknown, field: string, maxLength: number): string {
+  if (typeof value !== "string" || !value.trim() || value.length > maxLength) {
+    throw new McpError(ErrorCode.InvalidParams, `${field} must be a non-empty string up to ${maxLength} characters`);
+  }
+  return value.trim();
+}
+
+function parseNonNegativeInteger(value: unknown, field: string, fallback: number): number {
+  if (value == null) return fallback;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 50) {
+    throw new McpError(ErrorCode.InvalidParams, `${field} must be an integer from 0 to 50`);
+  }
+  return parsed;
+}
 
 // Geocode location using Photon (fast, no rate limits) with Nominatim fallback.
 // This bypasses Airbnb's broken server-side geocoding for non-US locations.
@@ -157,6 +172,11 @@ const PHOTON_TYPE_PRIORITY: Record<string, number> = {
   country: 1, state: 2, county: 3, city: 4, district: 5,
   locality: 6, street: 7, house: 8, other: 9,
 };
+const GEOCODE_CACHE_TTL_MS = 15 * 60 * 1000;
+const geocodeCache = new Map<string, {
+  expiresAt: number;
+  value: { ne_lat: string; ne_lng: string; sw_lat: string; sw_lng: string; displayName: string };
+}>();
 
 function pickBestPhotonFeature(features: any[]): any | null {
   // Pick the feature with the highest-priority type (city > hamlet > house etc).
@@ -175,12 +195,18 @@ async function geocodeLocation(location: string): Promise<{
   ne_lat: string; ne_lng: string; sw_lat: string; sw_lng: string;
   displayName: string;
 } | null> {
+  const cacheKey = location.toLocaleLowerCase("en-US");
+  const cached = geocodeCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    log('info', 'Using cached geocode result');
+    return cached.value;
+  }
   let extent: number[] | null = null;
   let displayName = location;
 
   // Try Photon first — fast, no strict rate limits, OSM data.
   try {
-    log('info', 'Geocoding location via Photon', { location });
+    log('info', 'Geocoding location via Photon');
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000);
     const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(location)}&limit=5`;
@@ -205,20 +231,11 @@ async function geocodeLocation(location: string): Promise<{
           extent = feature.properties.extent; // [west_lng, north_lat, east_lng, south_lat]
         }
         displayName = feature.properties?.name || location;
-        log('info', 'Photon selected feature', {
-          location,
-          type: feature.properties?.type,
-          name: feature.properties?.name,
-          country: feature.properties?.country,
-          hasExtent: !!extent,
-        });
+        log('info', 'Photon selected feature', { hasExtent: !!extent });
       }
     }
   } catch (error) {
-    log('warn', 'Photon geocoding failed', {
-      location,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    log('warn', 'Photon geocoding failed');
   }
 
   // Fall back to Nominatim if Photon didn't return a bbox.
@@ -227,7 +244,7 @@ async function geocodeLocation(location: string): Promise<{
   // See https://operations.osmfoundation.org/policies/nominatim/
   if (!extent) {
     try {
-      log('info', 'Falling back to Nominatim for geocoding', { location });
+      log('info', 'Falling back to Nominatim for geocoding');
       const nomController = new AbortController();
       const nomTimeout = setTimeout(() => nomController.abort(), 5000);
       const nomUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(location)}&format=json&limit=1`;
@@ -249,16 +266,16 @@ async function geocodeLocation(location: string): Promise<{
           const bb = nomResults[0].boundingbox; // [south_lat, north_lat, west_lng, east_lng]
           extent = [parseFloat(bb[2]), parseFloat(bb[1]), parseFloat(bb[3]), parseFloat(bb[0])];
           displayName = nomResults[0].display_name?.split(",")?.[0] || location;
-          log('info', 'Nominatim fallback succeeded', { location, extent });
+          log('info', 'Nominatim fallback succeeded');
         }
       }
     } catch (nomError) {
-      log('warn', 'Nominatim fallback also failed', { location });
+      log('warn', 'Nominatim fallback also failed');
     }
   }
 
   if (!extent || extent.length !== 4) {
-    log('warn', 'No bounding box from either geocoder', { location });
+    log('warn', 'No bounding box from either geocoder');
     return null;
   }
 
@@ -283,7 +300,8 @@ async function geocodeLocation(location: string): Promise<{
     displayName,
   };
 
-  log('info', 'Geocoded successfully (with 25% padding)', { location, coords });
+  geocodeCache.set(cacheKey, { expiresAt: Date.now() + GEOCODE_CACHE_TTL_MS, value: coords });
+  log('info', 'Geocoded successfully (with 25% padding)');
   return coords;
 }
 
@@ -294,24 +312,17 @@ const PROPERTY_TYPE_IDS: Record<string, string> = {
   hotel_room:   "4",
 };
 
-// Configuration from environment variables (set by DXT host)
-const IGNORE_ROBOTS_TXT = process.env.IGNORE_ROBOTS_TXT === "true" || process.argv.slice(2).includes("--ignore-robots-txt");
 // When true, skip the Photon/Nominatim geocoding step and let Airbnb's own
 // server-side geocoder handle the location string. Defaults to false so the
 // fix for non-US locations stays on by default; users who want zero third-party
 // outbound calls can opt out by setting DISABLE_GEOCODING=true.
 const DISABLE_GEOCODING = process.env.DISABLE_GEOCODING === "true";
 
-const robotsErrorMessage = "This path is disallowed by Airbnb's robots.txt to this User-agent. You may or may not want to run the server with '--ignore-robots-txt' args"
+const robotsErrorMessage = "This path is disallowed by Airbnb's robots.txt, or the robots policy is currently unavailable."
 let robotsTxtContent = "";
 
 // Enhanced robots.txt fetch with timeout and error handling
 async function fetchRobotsTxt() {
-  if (IGNORE_ROBOTS_TXT) {
-    log('info', 'Skipping robots.txt fetch (ignored by configuration)');
-    return;
-  }
-
   try {
     log('info', 'Fetching robots.txt from Airbnb');
     
@@ -333,18 +344,24 @@ async function fetchRobotsTxt() {
     }
     
     robotsTxtContent = await response.text();
+    robotsPolicyStatus = "available";
     log('info', 'Successfully fetched robots.txt');
   } catch (error) {
-    log('warn', 'Error fetching robots.txt, assuming all paths allowed', {
+    robotsPolicyStatus = "unavailable";
+    log('warn', 'Error fetching robots.txt; blocking requests until policy is available', {
       error: error instanceof Error ? error.message : String(error)
     });
-    robotsTxtContent = ""; // Empty robots.txt means everything is allowed
+    robotsTxtContent = "";
   }
 }
 
 function isPathAllowed(path: string): boolean {  
+  if (robotsPolicyStatus !== "available") {
+    log('warn', 'Robots policy is unavailable; blocking request');
+    return false;
+  }
   if (!robotsTxtContent) {
-    return true; // If we couldn't fetch robots.txt, assume allowed
+    return true;
   }
 
   try {
@@ -352,16 +369,13 @@ function isPathAllowed(path: string): boolean {
     const allowed = robots.isAllowed(path, USER_AGENT);
     
     if (!allowed) {
-      log('warn', 'Path disallowed by robots.txt', { path, userAgent: USER_AGENT });
+      log('warn', 'Path disallowed by robots.txt');
     }
     
     return allowed;
   } catch (error) {
-    log('warn', 'Error parsing robots.txt, allowing path', {
-      path,
-      error: error instanceof Error ? error.message : String(error)
-    });
-    return true; // If parsing fails, be permissive
+    log('warn', 'Error parsing robots.txt; blocking request');
+    return false;
   }
 }
 
@@ -384,6 +398,10 @@ async function fetchWithUserAgent(url: string, timeout: number = 30000) {
     
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    const contentLength = Number(response.headers.get("content-length") || "0");
+    if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BYTES) {
+      throw new Error(`Response exceeds ${MAX_RESPONSE_BYTES} byte limit`);
     }
     
     return response;
@@ -413,14 +431,18 @@ async function handleAirbnbSearch(params: any) {
     maxPrice,
     cursor,
     propertyType,
-    ignoreRobotsText = false,
   } = params;
+  const normalizedLocation = requireNonEmptyString(location, "location", 200);
+  const adults_int = parseNonNegativeInteger(adults, "adults", 1);
+  const children_int = parseNonNegativeInteger(children, "children", 0);
+  const infants_int = parseNonNegativeInteger(infants, "infants", 0);
+  const pets_int = parseNonNegativeInteger(pets, "pets", 0);
 
   // Build search URL
   // Airbnb path segments use "--" as the separator (e.g. "Paris--France"),
   // not URL-encoded punctuation.  encodeURIComponent turns commas into %2C
   // which confuses Airbnb's geocoder (e.g. Paris → Barneville-Carteret).
-  const slug = location
+  const slug = normalizedLocation
     .replace(/,\s*/g, "--")   // "Paris, France" → "Paris--France"
     .replace(/\s+/g, "-");    // remaining spaces → single dash
   const searchUrl = new URL(`${BASE_URL}/s/${encodeURIComponent(slug)}/homes`);
@@ -432,7 +454,7 @@ async function handleAirbnbSearch(params: any) {
   // Skipped when placeId is supplied (Airbnb's place lookup is reliable for those)
   // or when DISABLE_GEOCODING=true (user opt-out from third-party calls).
   if (!placeId && !DISABLE_GEOCODING) {
-    const coords = await geocodeLocation(location);
+    const coords = await geocodeLocation(normalizedLocation);
     if (coords) {
       searchUrl.searchParams.append("ne_lat", coords.ne_lat);
       searchUrl.searchParams.append("ne_lng", coords.ne_lng);
@@ -446,11 +468,6 @@ async function handleAirbnbSearch(params: any) {
   if (checkout) searchUrl.searchParams.append("checkout", checkout);
   
   // Add guests
-  const adults_int = parseInt(adults.toString());
-  const children_int = parseInt(children.toString());
-  const infants_int = parseInt(infants.toString());
-  const pets_int = parseInt(pets.toString());
-  
   const totalGuests = adults_int + children_int;
   if (totalGuests > 0) {
     searchUrl.searchParams.append("adults", adults_int.toString());
@@ -475,15 +492,15 @@ async function handleAirbnbSearch(params: any) {
 
   // Check if path is allowed by robots.txt
   const path = searchUrl.pathname + searchUrl.search;
-  if (!ignoreRobotsText && !isPathAllowed(path)) {
-    log('warn', 'Search blocked by robots.txt', { path, url: searchUrl.toString() });
+  if (!isPathAllowed(path)) {
+    log('warn', 'Search blocked by robots.txt');
     return {
       content: [{
         type: "text",
         text: JSON.stringify({
           error: robotsErrorMessage,
           url: searchUrl.toString(),
-          suggestion: "Consider enabling 'ignore_robots_txt' in extension settings if needed for testing"
+          suggestion: "Retry later after Airbnb robots.txt can be retrieved. This integration does not bypass robots.txt."
         }, null, 2)
       }],
       isError: true
@@ -538,7 +555,7 @@ async function handleAirbnbSearch(params: any) {
   };
 
   try {
-    log('info', 'Performing Airbnb search', { location, checkin, checkout, adults, children });
+    log('info', 'Performing Airbnb search');
     
     const response = await fetchWithUserAgent(searchUrl.toString());
     const html = await response.text();
@@ -581,11 +598,7 @@ async function handleAirbnbSearch(params: any) {
       const searchPath = ['niobeClientData', '0', '1', 'data', 'presentation', 'staysSearch', 'results'];
       const diagnosis = parsedRaw ? diagnoseJsonPath(parsedRaw, searchPath) : 'Could not parse script content as JSON';
 
-      log('error', 'Failed to parse search results', {
-        error: parseError instanceof Error ? parseError.message : String(parseError),
-        diagnosis,
-        url: searchUrl.toString()
-      });
+      log('error', 'Failed to parse search results', { diagnosis });
       
       return {
         content: [{
@@ -612,10 +625,7 @@ async function handleAirbnbSearch(params: any) {
       isError: false
     };
   } catch (error) {
-    log('error', 'Search request failed', {
-      error: error instanceof Error ? error.message : String(error),
-      url: searchUrl.toString()
-    });
+    log('error', 'Search request failed');
     
     return {
       content: [{
@@ -640,22 +650,24 @@ async function handleAirbnbListingDetails(params: any) {
     children = 0,
     infants = 0,
     pets = 0,
-    ignoreRobotsText = false,
   } = params;
+  const listingId = requireNonEmptyString(id, "id", 24);
+  if (!/^\d+$/.test(listingId)) {
+    throw new McpError(ErrorCode.InvalidParams, "id must be a numeric Airbnb listing id");
+  }
+  const adults_int = parseNonNegativeInteger(adults, "adults", 1);
+  const children_int = parseNonNegativeInteger(children, "children", 0);
+  const infants_int = parseNonNegativeInteger(infants, "infants", 0);
+  const pets_int = parseNonNegativeInteger(pets, "pets", 0);
 
   // Build listing URL
-  const listingUrl = new URL(`${BASE_URL}/rooms/${id}`);
+  const listingUrl = new URL(`${BASE_URL}/rooms/${listingId}`);
   
   // Add query parameters
   if (checkin) listingUrl.searchParams.append("check_in", checkin);
   if (checkout) listingUrl.searchParams.append("check_out", checkout);
   
   // Add guests
-  const adults_int = parseInt(adults.toString());
-  const children_int = parseInt(children.toString());
-  const infants_int = parseInt(infants.toString());
-  const pets_int = parseInt(pets.toString());
-  
   const totalGuests = adults_int + children_int;
   if (totalGuests > 0) {
     listingUrl.searchParams.append("adults", adults_int.toString());
@@ -666,15 +678,15 @@ async function handleAirbnbListingDetails(params: any) {
 
   // Check if path is allowed by robots.txt
   const path = listingUrl.pathname + listingUrl.search;
-  if (!ignoreRobotsText && !isPathAllowed(path)) {
-    log('warn', 'Listing details blocked by robots.txt', { path, url: listingUrl.toString() });
+  if (!isPathAllowed(path)) {
+    log('warn', 'Listing details blocked by robots.txt');
     return {
       content: [{
         type: "text",
         text: JSON.stringify({
           error: robotsErrorMessage,
           url: listingUrl.toString(),
-          suggestion: "Consider enabling 'ignore_robots_txt' in extension settings if needed for testing"
+          suggestion: "Retry later after Airbnb robots.txt can be retrieved. This integration does not bypass robots.txt."
         }, null, 2)
       }],
       isError: true
@@ -720,7 +732,7 @@ async function handleAirbnbListingDetails(params: any) {
   };
 
   try {
-    log('info', 'Fetching listing details', { id, checkin, checkout, adults, children });
+    log('info', 'Fetching listing details');
     
     const response = await fetchWithUserAgent(listingUrl.toString());
     const html = await response.text();
@@ -753,22 +765,14 @@ async function handleAirbnbListingDetails(params: any) {
           }
         });
         
-      log('info', 'Listing details fetched successfully', { 
-        id, 
-        sectionsFound: Array.isArray(details) ? details.length : 0 
-      });
+      log('info', 'Listing details fetched successfully', { sectionsFound: Array.isArray(details) ? details.length : 0 });
     } catch (parseError) {
       let parsedRaw: any = null;
       try { parsedRaw = JSON.parse(scriptContent); } catch (_) {}
       const detailsPath = ['niobeClientData', '0', '1', 'data', 'presentation', 'stayProductDetailPage', 'sections', 'sections'];
       const diagnosis = parsedRaw ? diagnoseJsonPath(parsedRaw, detailsPath) : 'Could not parse script content as JSON';
 
-      log('error', 'Failed to parse listing details', {
-        error: parseError instanceof Error ? parseError.message : String(parseError),
-        diagnosis,
-        id,
-        url: listingUrl.toString()
-      });
+      log('error', 'Failed to parse listing details', { diagnosis });
       
       return {
         content: [{
@@ -795,11 +799,7 @@ async function handleAirbnbListingDetails(params: any) {
       isError: false
     };
   } catch (error) {
-    log('error', 'Listing details request failed', {
-      error: error instanceof Error ? error.message : String(error),
-      id,
-      url: listingUrl.toString()
-    });
+    log('error', 'Listing details request failed');
     
     return {
       content: [{
@@ -842,7 +842,6 @@ function log(level: 'info' | 'warn' | 'error', message: string, data?: any) {
 
 log('info', 'Airbnb MCP Server starting', {
   version: VERSION,
-  ignoreRobotsTxt: IGNORE_ROBOTS_TXT,
   disableGeocoding: DISABLE_GEOCODING,
   nodeVersion: process.version,
   platform: process.platform
@@ -866,13 +865,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       throw new McpError(ErrorCode.InvalidParams, "Tool arguments are required");
     }
     
-    log('info', 'Tool call received', { 
-      tool: request.params.name,
-      arguments: request.params.arguments 
-    });
+    log('info', 'Tool call received', { tool: request.params.name });
     
     // Ensure robots.txt is loaded
-    if (!robotsTxtContent && !IGNORE_ROBOTS_TXT) {
+    if (robotsPolicyStatus === "uninitialized") {
       await fetchRobotsTxt();
     }
 
@@ -938,7 +934,7 @@ async function runServer() {
     
     log('info', 'Airbnb MCP Server running on stdio', {
       version: VERSION,
-      robotsRespected: !IGNORE_ROBOTS_TXT
+      robotsRespected: true
     });
     
     // Graceful shutdown handling

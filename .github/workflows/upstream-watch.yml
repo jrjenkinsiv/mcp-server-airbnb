@@ -1,0 +1,55 @@
+name: Watch upstream
+
+on:
+  schedule:
+    - cron: "17 15 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  report-upstream-changes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork metadata
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Report a reviewable upstream update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/openbnb-org/mcp-server-airbnb.git
+          git fetch --no-tags upstream main
+          upstream_sha="$(git rev-parse upstream/main)"
+          issue_title="Upstream sync available"
+          existing_issue="$(gh issue list --repo "$REPO" --state open --search "${issue_title} in:title" --json number --jq '.[0].number // empty')"
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            if [ -n "$existing_issue" ]; then
+              gh issue close "$existing_issue" --repo "$REPO" --comment "Fork main now contains upstream ${upstream_sha:0:12}; closing this sync reminder."
+            fi
+            exit 0
+          fi
+
+          commits="$(git log --format='- %h %s' HEAD..upstream/main)"
+          signature_status="unverified"
+          if git verify-commit "$upstream_sha" >/dev/null 2>&1; then
+            signature_status="verified"
+          fi
+          printf -v body '%s\n\n- Fork HEAD: %s\n- Upstream HEAD: %s\n- Upstream commit signature: %s\n\n## Commits to review\n%s\n\n%s' \
+            "Upstream has changes that are not in this fork. No code was merged, pushed, installed, or executed." \
+            "$(git rev-parse --short HEAD)" "${upstream_sha:0:12}" "$signature_status" "$commits" \
+            "To prepare the update locally, run scripts/sync-upstream.sh; it fetches and compares only, then prints the reviewed merge steps."
+
+          if [ -n "$existing_issue" ]; then
+            gh issue edit "$existing_issue" --repo "$REPO" --body "$body"
+          else
+            gh issue create --repo "$REPO" --title "$issue_title" --body "$body"
+          fi
