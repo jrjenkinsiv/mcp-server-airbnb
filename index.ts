@@ -145,13 +145,20 @@ const AIRBNB_LISTING_DETAILS_TOOL: Tool = {
 
 const AIRBNB_TRIP_SEARCH_TOOL: Tool = {
   name: "airbnb_trip_search",
-  description: "Plan and rank Airbnb stays in one call from either a destination or saved wishlist. Discovers candidates, checks exact dates and guests, reads best-available pre-submit pricing through the dedicated browser profile, and returns normalized quote confidence. Read-only; never reserves or enters checkout.",
+  description: "Plan and rank Airbnb stays in one call from a destination, a saved wishlist, or a list of explicit listing URLs. Discovers or accepts candidates, checks exact dates and guests, reads best-available pre-submit pricing through the dedicated browser profile, and returns normalized quote confidence. Read-only; never reserves or enters checkout.",
   annotations: { title: "Plan Airbnb stay", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   inputSchema: {
     type: "object",
     properties: {
       wishlistUrl: { type: "string", pattern: "^https://(www\\.)?airbnb\\.com/wishlists/[0-9]+/?$", description: "Full Airbnb wishlist URL" },
-      location: { type: "string", maxLength: 200, description: "Destination to search when wishlistUrl is not supplied" },
+      location: { type: "string", maxLength: 200, description: "Destination to search when wishlistUrl and listingUrls are not supplied" },
+      listingUrls: {
+        type: "array",
+        minItems: 1,
+        maxItems: 25,
+        items: { type: "string", pattern: "^https://(www\\.)?airbnb\\.com/rooms/[0-9]+/?$" },
+        description: "1-25 explicit Airbnb room-listing URLs to quote directly, instead of location or wishlistUrl"
+      },
       checkin: { type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", description: "Check-in date in YYYY-MM-DD format" },
       checkout: { type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", description: "Checkout date in YYYY-MM-DD format" },
       adults: { type: "number", minimum: 1, maximum: 50, description: "Number of adults" },
@@ -223,6 +230,50 @@ function requireIsoDate(value: unknown, field: string): string {
     throw new McpError(ErrorCode.InvalidParams, `${field} must be a valid YYYY-MM-DD date`);
   }
   return date;
+}
+
+// Restricts explicit-listing quote-mode input to HTTPS Airbnb room-listing
+// URLs before any browser invocation. Runs independently of the descriptive
+// JSON-schema `pattern` above (nothing in this server enforces schema-level
+// validation against the wire arguments), so this is the actual enforcement
+// point for allowlist/redirect/adversarial rejection.
+const AIRBNB_ROOM_HOSTS = new Set(["airbnb.com", "www.airbnb.com"]);
+const AIRBNB_ROOM_PATH_PATTERN = /^\/rooms\/[0-9]+\/?$/;
+
+function normalizeAirbnbRoomUrl(raw: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new McpError(ErrorCode.InvalidParams, `listingUrls entries must be valid URLs: ${raw}`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new McpError(ErrorCode.InvalidParams, `listingUrls entries must use https:// : ${raw}`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new McpError(ErrorCode.InvalidParams, `listingUrls entries must not include userinfo: ${raw}`);
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (!AIRBNB_ROOM_HOSTS.has(hostname)) {
+    throw new McpError(ErrorCode.InvalidParams, `listingUrls entries must be airbnb.com room listings: ${raw}`);
+  }
+  if (!AIRBNB_ROOM_PATH_PATTERN.test(parsed.pathname)) {
+    throw new McpError(ErrorCode.InvalidParams, `listingUrls entries must point at /rooms/<id>: ${raw}`);
+  }
+  // Normalize away query strings/fragments (open-redirect-shaped params) and
+  // trailing slashes; only the scheme, canonical host, and room path survive.
+  const roomId = parsed.pathname.replace(/\/$/, "").split("/").pop();
+  return `https://${hostname}/rooms/${roomId}`;
+}
+
+function normalizeListingUrls(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    throw new McpError(ErrorCode.InvalidParams, "listingUrls must be an array of Airbnb room URLs");
+  }
+  if (raw.length < 1 || raw.length > 25) {
+    throw new McpError(ErrorCode.InvalidParams, "listingUrls must contain 1 to 25 entries");
+  }
+  return raw.map((entry) => normalizeAirbnbRoomUrl(requireNonEmptyString(entry, "listingUrls[]", 500)));
 }
 
 // Geocode location using Photon (fast, no rate limits) with Nominatim fallback.
@@ -886,11 +937,13 @@ async function handleAirbnbListingDetails(params: any) {
 }
 
 async function handleAirbnbTripSearch(params: any) {
+  const providedModeCount = [params.wishlistUrl, params.location, params.listingUrls].filter(v => v != null).length;
+  if (providedModeCount !== 1) {
+    throw new McpError(ErrorCode.InvalidParams, "Provide exactly one of location, wishlistUrl, or listingUrls");
+  }
   const wishlistUrl = params.wishlistUrl == null ? null : requireNonEmptyString(params.wishlistUrl, "wishlistUrl", 300);
   const location = params.location == null ? null : requireNonEmptyString(params.location, "location", 200);
-  if (Boolean(wishlistUrl) === Boolean(location)) {
-    throw new McpError(ErrorCode.InvalidParams, "Provide exactly one of wishlistUrl or location");
-  }
+  const listingUrls = params.listingUrls == null ? null : normalizeListingUrls(params.listingUrls);
   const checkin = requireIsoDate(params.checkin, "checkin");
   const checkout = requireIsoDate(params.checkout, "checkout");
   if (checkout <= checkin) throw new McpError(ErrorCode.InvalidParams, "checkout must be after checkin");
@@ -899,14 +952,25 @@ async function handleAirbnbTripSearch(params: any) {
   const children = parseNonNegativeInteger(params.children, "children", 0);
   const infants = parseNonNegativeInteger(params.infants, "infants", 0);
   const pets = parseNonNegativeInteger(params.pets, "pets", 0);
-  const maxCandidates = parseNonNegativeInteger(params.maxCandidates, "maxCandidates", 10);
+  // Explicit-listing mode quotes every requested URL by default rather than
+  // silently truncating to the destination-discovery default of 10.
+  const maxCandidates = parseNonNegativeInteger(params.maxCandidates, "maxCandidates", listingUrls ? listingUrls.length : 10);
   if (maxCandidates < 1 || maxCandidates > 25) throw new McpError(ErrorCode.InvalidParams, "maxCandidates must be from 1 to 25");
   const budgetTotal = params.budgetTotal == null ? null : Number(params.budgetTotal);
   if (budgetTotal != null && (!Number.isFinite(budgetTotal) || budgetTotal < 0)) {
     throw new McpError(ErrorCode.InvalidParams, "budgetTotal must be a non-negative number");
   }
   let candidates: any[] = [];
-  if (location) {
+  let sourceLabel: "location" | "wishlist" | "listingUrls" = "location";
+  if (listingUrls) {
+    sourceLabel = "listingUrls";
+    candidates = listingUrls.map((url) => ({
+      id: url.match(/\/rooms\/([0-9]+)/)?.[1] ?? null,
+      url,
+      title: "Airbnb listing",
+      attributes: {},
+    }));
+  } else if (location) {
     const discovery = await handleAirbnbSearch({
       location, checkin, checkout, adults, children, infants, pets,
       propertyType: params.propertyType,
@@ -924,8 +988,14 @@ async function handleAirbnbTripSearch(params: any) {
         searchPrice: row.structuredDisplayPrice?.primaryLine?.accessibilityLabel || null,
       },
     }));
+  } else {
+    sourceLabel = "wishlist";
   }
   try {
+    // Exactly one bounded helper `run` invocation regardless of how many
+    // listingUrls were requested: the helper already accepts a `candidates`
+    // array (see airbnb-cdp.mjs `run()`), so explicit-listing mode reuses the
+    // existing interface unchanged instead of issuing one call per URL.
     const result = await runTripPlanner({ wishlistUrl, location, checkin, checkout, adults, children, infants, pets, maxCandidates, budgetTotal, candidates });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], isError: false };
   } catch (error) {
@@ -933,7 +1003,7 @@ async function handleAirbnbTripSearch(params: any) {
       const checkedAt = new Date().toISOString();
       const fallback = {
         schema: "lookup-scaffold/v1",
-        source: "location",
+        source: sourceLabel,
         status: "browser_unavailable",
         checkedAt,
         rows: candidates.map((candidate, index) => ({
@@ -945,8 +1015,10 @@ async function handleAirbnbTripSearch(params: any) {
           ranking: { score: null, reasons: [], tradeoffs: [] },
           quoteStatus: "unknown",
           checkedAt,
-          evidence: [{ kind: "search", label: "Airbnb dated search result", url: candidate.url }],
-          caveats: ["Authenticated browser quote unavailable; search-card price is not a full total."],
+          evidence: [{ kind: sourceLabel === "listingUrls" ? "listing" : "search", label: sourceLabel === "listingUrls" ? "Explicit Airbnb listing URL" : "Airbnb dated search result", url: candidate.url }],
+          caveats: sourceLabel === "listingUrls"
+            ? ["Authenticated browser quote unavailable for this explicit listing URL."]
+            : ["Authenticated browser quote unavailable; search-card price is not a full total."],
         })),
         caveats: [error.message],
       };
