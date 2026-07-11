@@ -25,9 +25,9 @@ class MCPTester {
   async startServer() {
     console.log('🚀 Starting MCP server...');
     
-    this.server = spawn('node', [SERVER_PATH], {
+    this.server = spawn('node', [SERVER_PATH, '--ignore-robots-txt'], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env }
+      env: { ...process.env, IGNORE_ROBOTS_TXT: 'true' }
     });
 
     this.server.stderr.on('data', (data) => {
@@ -128,7 +128,8 @@ class MCPTester {
         name: 'airbnb_search',
         arguments: {
           location: 'San Francisco, CA',
-          adults: 2
+          adults: 2,
+          ignoreRobotsText: true
         }
       });
       
@@ -169,7 +170,8 @@ class MCPTester {
       const response = await this.sendRequest('tools/call', {
         name: 'airbnb_listing_details',
         arguments: {
-          id: '670214003022775198'
+          id: '670214003022775198',
+          ignoreRobotsText: true
         }
       });
       
@@ -257,7 +259,7 @@ class MCPTester {
       try {
         const response = await this.sendRequest('tools/call', {
           name: 'airbnb_search',
-          arguments: { location: c.location },
+          arguments: { location: c.location, ignoreRobotsText: true },
         });
         const url = this._extractSearchUrl(response);
         const bbox = parseBbox(url);

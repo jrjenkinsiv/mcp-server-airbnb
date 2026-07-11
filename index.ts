@@ -88,6 +88,10 @@ const AIRBNB_SEARCH_TOOL: Tool = {
         enum: ["entire_home", "private_room", "shared_room", "hotel_room"],
         description: "Filter by property type: 'entire_home' (entire homes/apartments), 'private_room' (private rooms in shared homes), 'shared_room' (shared/dorm-style rooms), 'hotel_room' (hotel rooms)"
       },
+      ignoreRobotsText: {
+        type: "boolean",
+        description: "Bypass Airbnb robots.txt for this request. Disabled by default."
+      },
     },
     required: ["location"]
   }
@@ -126,6 +130,10 @@ const AIRBNB_LISTING_DETAILS_TOOL: Tool = {
       pets: {
         type: "number",
         description: "Number of pets"
+      },
+      ignoreRobotsText: {
+        type: "boolean",
+        description: "Bypass Airbnb robots.txt for this request. Disabled by default."
       },
     },
     required: ["id"]
@@ -317,12 +325,18 @@ const PROPERTY_TYPE_IDS: Record<string, string> = {
 // fix for non-US locations stays on by default; users who want zero third-party
 // outbound calls can opt out by setting DISABLE_GEOCODING=true.
 const DISABLE_GEOCODING = process.env.DISABLE_GEOCODING === "true";
+const IGNORE_ROBOTS_TXT = process.env.IGNORE_ROBOTS_TXT === "true" || process.argv.slice(2).includes("--ignore-robots-txt");
 
 const robotsErrorMessage = "This path is disallowed by Airbnb's robots.txt, or the robots policy is currently unavailable."
 let robotsTxtContent = "";
 
 // Enhanced robots.txt fetch with timeout and error handling
 async function fetchRobotsTxt() {
+  if (IGNORE_ROBOTS_TXT) {
+    robotsPolicyStatus = "available";
+    log('info', 'Robots policy bypass is enabled');
+    return;
+  }
   try {
     log('info', 'Fetching robots.txt from Airbnb');
     
@@ -356,6 +370,7 @@ async function fetchRobotsTxt() {
 }
 
 function isPathAllowed(path: string): boolean {  
+  if (IGNORE_ROBOTS_TXT) return true;
   if (robotsPolicyStatus !== "available") {
     log('warn', 'Robots policy is unavailable; blocking request');
     return false;
@@ -431,6 +446,7 @@ async function handleAirbnbSearch(params: any) {
     maxPrice,
     cursor,
     propertyType,
+    ignoreRobotsText = false,
   } = params;
   const normalizedLocation = requireNonEmptyString(location, "location", 200);
   const adults_int = parseNonNegativeInteger(adults, "adults", 1);
@@ -492,7 +508,7 @@ async function handleAirbnbSearch(params: any) {
 
   // Check if path is allowed by robots.txt
   const path = searchUrl.pathname + searchUrl.search;
-  if (!isPathAllowed(path)) {
+  if (!ignoreRobotsText && !isPathAllowed(path)) {
     log('warn', 'Search blocked by robots.txt');
     return {
       content: [{
@@ -500,7 +516,7 @@ async function handleAirbnbSearch(params: any) {
         text: JSON.stringify({
           error: robotsErrorMessage,
           url: searchUrl.toString(),
-          suggestion: "Retry later after Airbnb robots.txt can be retrieved. This integration does not bypass robots.txt."
+          suggestion: "Enable the explicit robots bypass only when you accept the scraper's operational and policy risk."
         }, null, 2)
       }],
       isError: true
@@ -650,6 +666,7 @@ async function handleAirbnbListingDetails(params: any) {
     children = 0,
     infants = 0,
     pets = 0,
+    ignoreRobotsText = false,
   } = params;
   const listingId = requireNonEmptyString(id, "id", 24);
   if (!/^\d+$/.test(listingId)) {
@@ -678,7 +695,7 @@ async function handleAirbnbListingDetails(params: any) {
 
   // Check if path is allowed by robots.txt
   const path = listingUrl.pathname + listingUrl.search;
-  if (!isPathAllowed(path)) {
+  if (!ignoreRobotsText && !isPathAllowed(path)) {
     log('warn', 'Listing details blocked by robots.txt');
     return {
       content: [{
@@ -686,7 +703,7 @@ async function handleAirbnbListingDetails(params: any) {
         text: JSON.stringify({
           error: robotsErrorMessage,
           url: listingUrl.toString(),
-          suggestion: "Retry later after Airbnb robots.txt can be retrieved. This integration does not bypass robots.txt."
+          suggestion: "Enable the explicit robots bypass only when you accept the scraper's operational and policy risk."
         }, null, 2)
       }],
       isError: true
@@ -843,6 +860,7 @@ function log(level: 'info' | 'warn' | 'error', message: string, data?: any) {
 log('info', 'Airbnb MCP Server starting', {
   version: VERSION,
   disableGeocoding: DISABLE_GEOCODING,
+  robotsBypassEnabled: IGNORE_ROBOTS_TXT,
   nodeVersion: process.version,
   platform: process.platform
 });
@@ -868,7 +886,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     log('info', 'Tool call received', { tool: request.params.name });
     
     // Ensure robots.txt is loaded
-    if (robotsPolicyStatus === "uninitialized") {
+    if (robotsPolicyStatus === "uninitialized" && !IGNORE_ROBOTS_TXT) {
       await fetchRobotsTxt();
     }
 
@@ -934,7 +952,7 @@ async function runServer() {
     
     log('info', 'Airbnb MCP Server running on stdio', {
       version: VERSION,
-      robotsRespected: true
+      robotsRespected: !IGNORE_ROBOTS_TXT
     });
     
     // Graceful shutdown handling

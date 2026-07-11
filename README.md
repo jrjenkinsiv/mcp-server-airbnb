@@ -58,6 +58,8 @@ This extension is packaged as an MCP Bundle (`.mcpb`) file. To install:
 2. Open the file — Claude Desktop will show an installation dialog
 3. Configure the extension settings as needed
 
+To enable the optional bypass, open the extension settings and turn on **Ignore robots.txt**.
+
 ### For Cursor, etc.
 
 Before starting make sure [Node.js](https://nodejs.org/) is installed on your desktop for `npx` to work.
@@ -83,6 +85,11 @@ Before starting make sure [Node.js](https://nodejs.org/) is installed on your de
 ## Configuration
 
 The extension provides the following user-configurable options:
+
+### Ignore robots.txt
+- **Type**: Boolean (checkbox)
+- **Default**: `false`
+- **Description**: Bypass robots.txt restrictions for this scraper. Enable only when you explicitly accept that operational and policy risk.
 
 ### Disable third-party geocoding
 - **Type**: Boolean (checkbox)
@@ -110,6 +117,7 @@ Search for Airbnb listings with comprehensive filtering options.
 - `maxPrice` (optional): Maximum price per night
 - `cursor` (optional): Pagination cursor for browsing results
 - `propertyType` (optional): Filter by property type — `entire_home`, `private_room`, `shared_room`, or `hotel_room`
+- `ignoreRobotsText` (optional): Bypass robots.txt for this request
 
 **Returns:**
 - Search results with property details, pricing, and direct links
@@ -128,6 +136,7 @@ Get detailed information about a specific Airbnb listing.
 - `children` (optional): Number of children (default: 0)
 - `infants` (optional): Number of infants (default: 0)
 - `pets` (optional): Number of pets (default: 0)
+- `ignoreRobotsText` (optional): Bypass robots.txt for this request
 
 **Returns:**
 - Detailed property information including:
@@ -217,7 +226,8 @@ node dist/index.js
 ## Legal and Ethical Considerations
 
 - **Respect Airbnb's Terms of Service**: This extension is for legitimate research and booking assistance
-- **Robots.txt Compliance**: This fork fails closed if Airbnb's robots.txt cannot be fetched or parsed; it has no override.
+- **Robots.txt Compliance**: This fork fails closed if Airbnb's robots.txt cannot be fetched or parsed, unless the explicit opt-in bypass is enabled.
+- **Robots.txt bypass**: Disabled by default; available for the scraper's intended use.
 - **Rate Limiting**: Be mindful of request frequency to avoid overwhelming Airbnb's servers
 - **Data Usage**: Only extract publicly available information for legitimate purposes
 

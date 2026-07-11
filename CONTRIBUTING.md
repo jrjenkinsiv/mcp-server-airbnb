@@ -27,8 +27,9 @@ upstream contribution.
 ## Local security contract
 
 - This fork is search and listing-detail only; it never books or messages hosts.
-- It does not expose a robots.txt override and fails closed if robots.txt cannot be
-  fetched or parsed.
+- Robots.txt is honored by default and fails closed if it cannot be fetched or parsed.
+  The explicit bypass is available for the scraper's intended use, but must never be
+  made the default configuration.
 - Tool-call logs contain only the tool name, duration, and outcome—not destinations,
   dates, guest counts, or listing identifiers.
 - Keep dependencies patched: `npm audit --omit=dev` must report zero production

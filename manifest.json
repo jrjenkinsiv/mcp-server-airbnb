@@ -34,6 +34,7 @@
       ],
       "env": {
         "NODE_ENV": "production",
+        "IGNORE_ROBOTS_TXT": "${user_config.ignore_robots_txt}",
         "DISABLE_GEOCODING": "${user_config.disable_geocoding}"
       }
     }
@@ -62,6 +63,13 @@
     }
   },
   "user_config": {
+    "ignore_robots_txt": {
+      "type": "boolean",
+      "title": "Ignore robots.txt",
+      "description": "Bypass Airbnb robots.txt restrictions. Disabled by default.",
+      "default": false,
+      "required": false
+    },
     "disable_geocoding": {
       "type": "boolean",
       "title": "Disable third-party geocoding",
