@@ -373,11 +373,15 @@ class MCPTester {
       if (response.error) throw new Error(`Server error: ${response.error.message}`);
       const result = JSON.parse(response.result?.content?.[0]?.text || '{}');
       if (result.schema !== 'lookup-scaffold/v1') throw new Error('Missing lookup-scaffold/v1 result');
+      // Top-level envelope must be labeled "listingUrls", not the shared
+      // helper's default "location" label -- see index.ts's override right
+      // after runTripPlanner resolves on the success path.
+      if (result.source !== 'listingUrls') throw new Error(`Expected top-level source "listingUrls", got "${result.source}"`);
       if (!Array.isArray(result.rows) || result.rows.length !== 1) throw new Error(`Expected exactly 1 row, got ${result.rows?.length}`);
       const row = result.rows[0];
       if (!['exact', 'estimated', 'unknown'].includes(row.quoteStatus)) throw new Error(`Invalid quoteStatus: ${row.quoteStatus}`);
       if (row.source?.url !== 'https://www.airbnb.com/rooms/1648790451780419277') throw new Error('Row source URL does not match requested listing');
-      console.log(`PASS: Explicit-listing quote returned 1 normalized row (status=${result.status}, quoteStatus=${row.quoteStatus})`);
+      console.log(`PASS: Explicit-listing quote returned 1 normalized row (status=${result.status}, source=${result.source}, quoteStatus=${row.quoteStatus})`);
       return true;
     } catch (error) {
       console.error('FAIL: explicit-listing fixture test failed:', error.message);

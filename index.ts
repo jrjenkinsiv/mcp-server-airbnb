@@ -997,6 +997,13 @@ async function handleAirbnbTripSearch(params: any) {
     // array (see airbnb-cdp.mjs `run()`), so explicit-listing mode reuses the
     // existing interface unchanged instead of issuing one call per URL.
     const result = await runTripPlanner({ wishlistUrl, location, checkin, checkout, adults, children, infants, pets, maxCandidates, budgetTotal, candidates });
+    // The shared helper's `run()` return only distinguishes "wishlist" vs its
+    // default "location" — it has no concept of explicit-listing mode, so the
+    // top-level envelope label must be corrected here to match the labeling
+    // already applied on the AirbnbBrowserError fallback path below.
+    if (sourceLabel === "listingUrls" && result && typeof result === "object") {
+      (result as Record<string, unknown>).source = "listingUrls";
+    }
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], isError: false };
   } catch (error) {
     if (candidates.length && error instanceof AirbnbBrowserError) {
