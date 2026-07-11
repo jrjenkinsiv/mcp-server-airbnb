@@ -148,12 +148,34 @@ Get detailed information about a specific Airbnb listing.
 
 ### `airbnb_trip_search`
 
-The normal user-facing tool. In one call it accepts either a destination or
-wishlist plus dates, travelers, pets, budget, and candidate limit; then it
-discovers, quotes, and ranks stays using the `lookup-scaffold/v1` result schema.
-Search-card prices are never mislabeled as full totals. Browser-backed quotes
-are `exact`, `estimated`, or `unknown` according to the visible pre-submit
-breakdown. It never presses Reserve or enters checkout.
+The normal user-facing tool. In one call it accepts exactly one of a
+destination (`location`), a saved wishlist (`wishlistUrl`), or 1-25 explicit
+listing URLs (`listingUrls`), plus dates, travelers, pets, budget, and
+candidate limit; then it discovers or accepts candidates, quotes, and ranks
+stays using the `lookup-scaffold/v1` result schema. Search-card prices are
+never mislabeled as full totals. Browser-backed quotes are `exact`,
+`estimated`, or `unknown` according to the visible pre-submit breakdown. It
+never presses Reserve or enters checkout.
+
+**Explicit-listing quote mode** (`listingUrls`): pass 1-25 Airbnb listing URLs
+directly to get a normalized quote for exactly those listings, without a
+destination search or wishlist lookup. Every URL is normalized and restricted
+to `https://` `airbnb.com`/`www.airbnb.com` `/rooms/<id>` before any browser
+invocation — non-HTTPS URLs, non-Airbnb hosts, open-redirect-shaped paths,
+`javascript:` URLs, and userinfo tricks are all rejected with `InvalidParams`
+before the request reaches the browser helper. The mode sends exactly one
+bounded helper `run` invocation for the whole batch (not one call per URL) and
+reuses the same read-only quote path as destination and wishlist search, so it
+never presses Reserve or enters checkout either.
+
+```json
+{
+  "listingUrls": ["https://www.airbnb.com/rooms/1234567890"],
+  "checkin": "2026-09-14",
+  "checkout": "2026-09-17",
+  "adults": 2
+}
+```
 
 ## Authenticated browser setup
 
