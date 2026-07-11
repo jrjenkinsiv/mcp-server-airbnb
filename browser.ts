@@ -10,11 +10,11 @@ function helperPath() {
   return configured || join(homedir(), "Development", "homelab-agents", "skills", "trip-planner", "scripts", "airbnb-cdp.mjs");
 }
 
-export async function runTripPlanner(input: Record<string, unknown>): Promise<unknown> {
+async function runBrowserHelper(command: "run" | "wishlist-manage", input: Record<string, unknown>): Promise<unknown> {
   const endpoint = process.env.AIRBNB_CDP_URL || "http://127.0.0.1:9226";
   const helper = helperPath();
   return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [helper, "run", "--endpoint", endpoint], {
+    const child = spawn(process.execPath, [helper, command, "--endpoint", endpoint], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env },
       shell: false,
@@ -23,7 +23,7 @@ export async function runTripPlanner(input: Record<string, unknown>): Promise<un
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      reject(new AirbnbBrowserError("Airbnb trip planning timed out"));
+      reject(new AirbnbBrowserError(`Airbnb browser ${command} timed out`));
     }, 240000);
     child.stdout.on("data", chunk => {
       stdout += chunk.toString();
@@ -58,4 +58,12 @@ export async function runTripPlanner(input: Record<string, unknown>): Promise<un
     });
     child.stdin.end(JSON.stringify(input));
   });
+}
+
+export async function runTripPlanner(input: Record<string, unknown>): Promise<unknown> {
+  return await runBrowserHelper("run", input);
+}
+
+export async function manageWishlist(input: Record<string, unknown>): Promise<unknown> {
+  return await runBrowserHelper("wishlist-manage", input);
 }

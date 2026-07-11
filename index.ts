@@ -12,7 +12,7 @@ import {
 import fetch from "node-fetch";
 import * as cheerio from "cheerio";
 import { cleanObject, flattenArraysInObject, pickBySchema, diagnoseJsonPath } from "./util.js";
-import { AirbnbBrowserError, runTripPlanner } from "./browser.js";
+import { AirbnbBrowserError, manageWishlist, runTripPlanner } from "./browser.js";
 import robotsParser from "robots-parser";
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -166,10 +166,27 @@ const AIRBNB_TRIP_SEARCH_TOOL: Tool = {
   }
 };
 
+const AIRBNB_WISHLIST_MANAGE_TOOL: Tool = {
+  name: "airbnb_wishlist_manage",
+  description: "Manage Airbnb wishlists through the signed-in dedicated browser profile. List wishlists, create a wishlist seeded with one listing, or explicitly add/remove one listing from one wishlist. Never books or enters checkout.",
+  annotations: { title: "Manage Airbnb wishlists", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  inputSchema: {
+    type: "object",
+    properties: {
+      action: { type: "string", enum: ["list", "create", "add", "remove"], description: "Wishlist operation; defaults to list" },
+      wishlistUrl: { type: "string", pattern: "^https://(www\\.)?airbnb\\.com/wishlists/[0-9]+/?$", description: "Exact target wishlist URL for add/remove" },
+      wishlistName: { type: "string", minLength: 1, maxLength: 80, description: "New name for create, or exact existing name for add/remove" },
+      listingUrl: { type: "string", pattern: "^https://(www\\.)?airbnb\\.com/rooms/[0-9]+/?$", description: "Exact listing URL for create, or a single add/remove" },
+      listingUrls: { type: "array", minItems: 1, maxItems: 25, items: { type: "string", pattern: "^https://(www\\.)?airbnb\\.com/rooms/[0-9]+/?$" }, description: "Explicit listing URLs for a batched add/remove" }
+    }
+  }
+};
+
 const AIRBNB_TOOLS = [
   AIRBNB_SEARCH_TOOL,
   AIRBNB_LISTING_DETAILS_TOOL,
   AIRBNB_TRIP_SEARCH_TOOL,
+  AIRBNB_WISHLIST_MANAGE_TOOL,
 ] as const;
 
 // Utility functions
@@ -940,6 +957,33 @@ async function handleAirbnbTripSearch(params: any) {
   }
 }
 
+async function handleAirbnbWishlistManage(params: any) {
+  const action = params.action == null ? "list" : requireNonEmptyString(params.action, "action", 20);
+  if (!["list", "create", "add", "remove"].includes(action)) {
+    throw new McpError(ErrorCode.InvalidParams, "action must be list, create, add, or remove");
+  }
+  const wishlistUrl = params.wishlistUrl == null ? null : requireNonEmptyString(params.wishlistUrl, "wishlistUrl", 300);
+  const wishlistName = params.wishlistName == null ? null : requireNonEmptyString(params.wishlistName, "wishlistName", 80);
+  const listingUrl = params.listingUrl == null ? null : requireNonEmptyString(params.listingUrl, "listingUrl", 300);
+  const listingUrls = params.listingUrls == null ? null : params.listingUrls;
+  if (listingUrls != null && (!Array.isArray(listingUrls) || listingUrls.length < 1 || listingUrls.length > 25 || listingUrls.some(value => typeof value !== "string" || !value.trim()))) {
+    throw new McpError(ErrorCode.InvalidParams, "listingUrls must contain 1-25 non-empty listing URLs");
+  }
+  if (action === "create" && (!wishlistName || !listingUrl)) {
+    throw new McpError(ErrorCode.InvalidParams, "create requires wishlistName and listingUrl");
+  }
+  if (["add", "remove"].includes(action) && (Boolean(listingUrl) === Boolean(listingUrls) || Boolean(wishlistUrl) === Boolean(wishlistName))) {
+    throw new McpError(ErrorCode.InvalidParams, `${action} requires exactly one of listingUrl or listingUrls, and exactly one of wishlistUrl or wishlistName`);
+  }
+  try {
+    const result = await manageWishlist({ action, wishlistUrl, wishlistName, listingUrl, listingUrls });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], isError: false };
+  } catch (error) {
+    const message = error instanceof AirbnbBrowserError ? error.message : "Airbnb wishlist management failed";
+    return { content: [{ type: "text", text: JSON.stringify({ error: message }, null, 2) }], isError: true };
+  }
+}
+
 // Server setup
 const server = new Server(
   {
@@ -1012,6 +1056,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "airbnb_trip_search": {
         result = await handleAirbnbTripSearch(request.params.arguments);
+        break;
+      }
+
+      case "airbnb_wishlist_manage": {
+        result = await handleAirbnbWishlistManage(request.params.arguments);
         break;
       }
 
