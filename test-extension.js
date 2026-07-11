@@ -259,7 +259,7 @@ class MCPTester {
   // the 1/25/26 listingUrls bounds. No browser required — all of these are
   // rejected during handler-level schema validation before any helper run.
   async testTripSearchMutualExclusionAndBounds() {
-    console.log('\n🔒 Testing airbnb_trip_search mutual exclusion + listingUrls bounds...');
+    console.log('\nTesting airbnb_trip_search mutual exclusion + listingUrls bounds...');
     const baseArgs = { checkin: '2026-09-14', checkout: '2026-09-17', adults: 2 };
     const roomUrl = (id) => `https://www.airbnb.com/rooms/${id}`;
     const manyUrls = (n) => Array.from({ length: n }, (_, i) => roomUrl(1000000000000000000n + BigInt(i)));
@@ -274,7 +274,7 @@ class MCPTester {
     ];
     for (const [label, args, pattern] of cases) {
       const ok = await this._expectTripSearchError(label, args, pattern);
-      console.log(`   ${ok ? '✅' : '❌'} ${label}`);
+      console.log(`   ${ok ? 'PASS' : 'FAIL'} ${label}`);
       allOk = allOk && ok;
     }
     return allOk;
@@ -284,7 +284,7 @@ class MCPTester {
   // before any browser invocation. Covers non-Airbnb host, non-HTTPS,
   // open-redirect-shaped, javascript:, and userinfo-trick adversarial shapes.
   async testTripSearchListingUrlAllowlist() {
-    console.log('\n🛡️  Testing airbnb_trip_search listingUrls allowlist...');
+    console.log('\nTesting airbnb_trip_search listingUrls allowlist...');
     const baseArgs = { checkin: '2026-09-14', checkout: '2026-09-17', adults: 2 };
     const adversarial = [
       ['non-Airbnb host', 'https://evil.example.com/rooms/123'],
@@ -300,7 +300,7 @@ class MCPTester {
     let allOk = true;
     for (const [label, url] of adversarial) {
       const ok = await this._expectTripSearchError(label, { ...baseArgs, listingUrls: [url] }, /listingUrls entries|must be valid URLs|listingUrls must/i);
-      console.log(`   ${ok ? '✅' : '❌'} rejects ${label}: ${url}`);
+      console.log(`   ${ok ? 'PASS' : 'FAIL'} rejects ${label}: ${url}`);
       allOk = allOk && ok;
     }
     return allOk;
@@ -313,7 +313,7 @@ class MCPTester {
   // and index.ts's fallback path still returns one normalized row per
   // requested URL, showing all 25 candidates were built and passed through.
   async testTripSearchListingUrlBoundaryAccepted() {
-    console.log('\n📏 Testing airbnb_trip_search accepts the 25-entry listingUrls bound...');
+    console.log('\nTesting airbnb_trip_search accepts the 25-entry listingUrls bound...');
     const throwaway = spawn('node', [SERVER_PATH, '--ignore-robots-txt'], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, IGNORE_ROBOTS_TXT: 'true', AIRBNB_CDP_URL: 'http://127.0.0.1:1' },
@@ -342,10 +342,10 @@ class MCPTester {
       const result = JSON.parse(response.result?.content?.[0]?.text || '{}');
       if (result.schema !== 'lookup-scaffold/v1') throw new Error('Missing lookup-scaffold/v1 result');
       if (!Array.isArray(result.rows) || result.rows.length !== 25) throw new Error(`Expected 25 rows, got ${result.rows?.length}`);
-      console.log(`✅ 25 listingUrls accepted and produced ${result.rows.length} normalized rows (status=${result.status})`);
+      console.log(`PASS: 25 listingUrls accepted and produced ${result.rows.length} normalized rows (status=${result.status})`);
       return true;
     } catch (error) {
-      console.error('❌ 25-entry listingUrls boundary test failed:', error.message);
+      console.error('FAIL: 25-entry listingUrls boundary test failed:', error.message);
       return false;
     } finally {
       throwaway.kill('SIGTERM');
@@ -359,7 +359,7 @@ class MCPTester {
   // request reaches exactly one bounded helper run and the response is
   // normalized, without requiring a live authenticated browser in CI.
   async testTripSearchExplicitListingFixture() {
-    console.log('\n📦 Testing airbnb_trip_search explicit-listing fixture shape...');
+    console.log('\nTesting airbnb_trip_search explicit-listing fixture shape...');
     try {
       const response = await this.sendRequest('tools/call', {
         name: 'airbnb_trip_search',
@@ -377,10 +377,10 @@ class MCPTester {
       const row = result.rows[0];
       if (!['exact', 'estimated', 'unknown'].includes(row.quoteStatus)) throw new Error(`Invalid quoteStatus: ${row.quoteStatus}`);
       if (row.source?.url !== 'https://www.airbnb.com/rooms/1648790451780419277') throw new Error('Row source URL does not match requested listing');
-      console.log(`✅ Explicit-listing quote returned 1 normalized row (status=${result.status}, quoteStatus=${row.quoteStatus})`);
+      console.log(`PASS: Explicit-listing quote returned 1 normalized row (status=${result.status}, quoteStatus=${row.quoteStatus})`);
       return true;
     } catch (error) {
-      console.error('❌ explicit-listing fixture test failed:', error.message);
+      console.error('FAIL: explicit-listing fixture test failed:', error.message);
       return false;
     }
   }
