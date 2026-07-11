@@ -168,6 +168,15 @@ Sign in to Airbnb yourself in that profile, then leave the browser running. The
 default endpoint is `http://127.0.0.1:9226`; override it with `AIRBNB_CDP_URL`.
 The profile remains under `~/.chrome-agent-profiles/airbnb` and is never read or
 copied by the MCP server—the browser applies its own authenticated session.
+
+### `airbnb_wishlist_manage`
+
+Uses that same signed-in, dedicated browser profile for explicit wishlist
+operations. `list` returns the available wishlists. `create` requires a name and
+a seed listing URL. `add` and `remove` accept either one listing URL or a batch
+of 1-25 explicit listing URLs plus exactly one target wishlist URL or exact
+wishlist name. Mutations run serially in one browser session and are verified by
+re-reading the target wishlist; this tool never reserves or enters checkout.
 The domain helper is provided by the homelab `trip-planner` skill and defaults
 to `~/Development/homelab-agents/skills/trip-planner/scripts/airbnb-cdp.mjs`.
 
