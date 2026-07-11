@@ -144,7 +144,32 @@ Get detailed information about a specific Airbnb listing.
   - Amenities and facilities
   - House rules and policies
   - Property highlights and descriptions
-  - Direct link to the listing
+- Direct link to the listing
+
+### `airbnb_trip_search`
+
+The normal user-facing tool. In one call it accepts either a destination or
+wishlist plus dates, travelers, pets, budget, and candidate limit; then it
+discovers, quotes, and ranks stays using the `lookup-scaffold/v1` result schema.
+Search-card prices are never mislabeled as full totals. Browser-backed quotes
+are `exact`, `estimated`, or `unknown` according to the visible pre-submit
+breakdown. It never presses Reserve or enters checkout.
+
+## Authenticated browser setup
+
+Wishlist and full-price tools use an isolated Chrome profile on loopback CDP.
+Launch it with:
+
+```bash
+scripts/launch-airbnb-chrome.sh --foreground
+```
+
+Sign in to Airbnb yourself in that profile, then leave the browser running. The
+default endpoint is `http://127.0.0.1:9226`; override it with `AIRBNB_CDP_URL`.
+The profile remains under `~/.chrome-agent-profiles/airbnb` and is never read or
+copied by the MCP server—the browser applies its own authenticated session.
+The domain helper is provided by the homelab `trip-planner` skill and defaults
+to `~/Development/homelab-agents/skills/trip-planner/scripts/airbnb-cdp.mjs`.
 
 ## Technical Details
 

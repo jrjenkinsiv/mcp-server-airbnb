@@ -12,6 +12,7 @@ import {
 import fetch from "node-fetch";
 import * as cheerio from "cheerio";
 import { cleanObject, flattenArraysInObject, pickBySchema, diagnoseJsonPath } from "./util.js";
+import { AirbnbBrowserError, runTripPlanner } from "./browser.js";
 import robotsParser from "robots-parser";
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -35,6 +36,7 @@ const VERSION = getVersion();
 // Tool definitions
 const AIRBNB_SEARCH_TOOL: Tool = {
   name: "airbnb_search",
+  annotations: { title: "Search Airbnb", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   description: "Search for Airbnb listings with various filters and pagination. Provide direct links to the user",
   inputSchema: {
     type: "object",
@@ -99,6 +101,7 @@ const AIRBNB_SEARCH_TOOL: Tool = {
 
 const AIRBNB_LISTING_DETAILS_TOOL: Tool = {
   name: "airbnb_listing_details",
+  annotations: { title: "Get Airbnb listing details", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   description: "Get detailed information about a specific Airbnb listing. Provide direct links to the user",
   inputSchema: {
     type: "object",
@@ -140,9 +143,33 @@ const AIRBNB_LISTING_DETAILS_TOOL: Tool = {
   }
 };
 
+const AIRBNB_TRIP_SEARCH_TOOL: Tool = {
+  name: "airbnb_trip_search",
+  description: "Plan and rank Airbnb stays in one call from either a destination or saved wishlist. Discovers candidates, checks exact dates and guests, reads best-available pre-submit pricing through the dedicated browser profile, and returns normalized quote confidence. Read-only; never reserves or enters checkout.",
+  annotations: { title: "Plan Airbnb stay", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  inputSchema: {
+    type: "object",
+    properties: {
+      wishlistUrl: { type: "string", pattern: "^https://(www\\.)?airbnb\\.com/wishlists/[0-9]+/?$", description: "Full Airbnb wishlist URL" },
+      location: { type: "string", maxLength: 200, description: "Destination to search when wishlistUrl is not supplied" },
+      checkin: { type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", description: "Check-in date in YYYY-MM-DD format" },
+      checkout: { type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", description: "Checkout date in YYYY-MM-DD format" },
+      adults: { type: "number", minimum: 1, maximum: 50, description: "Number of adults" },
+      children: { type: "number", minimum: 0, maximum: 50, description: "Number of children; defaults to 0" },
+      infants: { type: "number", minimum: 0, maximum: 50, description: "Number of infants; defaults to 0" },
+      pets: { type: "number", minimum: 0, maximum: 50, description: "Number of pets; defaults to 0" },
+      budgetTotal: { type: "number", minimum: 0, description: "Optional maximum total-stay budget used for ranking" },
+      maxCandidates: { type: "number", minimum: 1, maximum: 25, description: "Maximum candidates to quote; defaults to 10" },
+      propertyType: { type: "string", enum: ["entire_home", "private_room", "shared_room", "hotel_room"], description: "Property type for destination discovery; defaults to any" }
+    },
+    required: ["checkin", "checkout", "adults"]
+  }
+};
+
 const AIRBNB_TOOLS = [
   AIRBNB_SEARCH_TOOL,
   AIRBNB_LISTING_DETAILS_TOOL,
+  AIRBNB_TRIP_SEARCH_TOOL,
 ] as const;
 
 // Utility functions
@@ -170,6 +197,15 @@ function parseNonNegativeInteger(value: unknown, field: string, fallback: number
     throw new McpError(ErrorCode.InvalidParams, `${field} must be an integer from 0 to 50`);
   }
   return parsed;
+}
+
+function requireIsoDate(value: unknown, field: string): string {
+  const date = requireNonEmptyString(value, field, 10);
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== date) {
+    throw new McpError(ErrorCode.InvalidParams, `${field} must be a valid YYYY-MM-DD date`);
+  }
+  return date;
 }
 
 // Geocode location using Photon (fast, no rate limits) with Nominatim fallback.
@@ -832,6 +868,78 @@ async function handleAirbnbListingDetails(params: any) {
   }
 }
 
+async function handleAirbnbTripSearch(params: any) {
+  const wishlistUrl = params.wishlistUrl == null ? null : requireNonEmptyString(params.wishlistUrl, "wishlistUrl", 300);
+  const location = params.location == null ? null : requireNonEmptyString(params.location, "location", 200);
+  if (Boolean(wishlistUrl) === Boolean(location)) {
+    throw new McpError(ErrorCode.InvalidParams, "Provide exactly one of wishlistUrl or location");
+  }
+  const checkin = requireIsoDate(params.checkin, "checkin");
+  const checkout = requireIsoDate(params.checkout, "checkout");
+  if (checkout <= checkin) throw new McpError(ErrorCode.InvalidParams, "checkout must be after checkin");
+  const adults = parseNonNegativeInteger(params.adults, "adults", 1);
+  if (adults < 1) throw new McpError(ErrorCode.InvalidParams, "adults must be at least 1");
+  const children = parseNonNegativeInteger(params.children, "children", 0);
+  const infants = parseNonNegativeInteger(params.infants, "infants", 0);
+  const pets = parseNonNegativeInteger(params.pets, "pets", 0);
+  const maxCandidates = parseNonNegativeInteger(params.maxCandidates, "maxCandidates", 10);
+  if (maxCandidates < 1 || maxCandidates > 25) throw new McpError(ErrorCode.InvalidParams, "maxCandidates must be from 1 to 25");
+  const budgetTotal = params.budgetTotal == null ? null : Number(params.budgetTotal);
+  if (budgetTotal != null && (!Number.isFinite(budgetTotal) || budgetTotal < 0)) {
+    throw new McpError(ErrorCode.InvalidParams, "budgetTotal must be a non-negative number");
+  }
+  let candidates: any[] = [];
+  if (location) {
+    const discovery = await handleAirbnbSearch({
+      location, checkin, checkout, adults, children, infants, pets,
+      propertyType: params.propertyType,
+      ignoreRobotsText: true,
+    });
+    if (discovery.isError) return discovery;
+    const payload = JSON.parse(discovery.content[0].text);
+    candidates = (payload.searchResults || []).slice(0, maxCandidates).map((row: any) => ({
+      id: row.id,
+      url: row.url,
+      title: row.demandStayListing?.description?.name?.localizedStringWithTranslationPreference || "Airbnb listing",
+      attributes: {
+        summary: row.structuredContent?.primaryLine || null,
+        rating: row.avgRatingA11yLabel || null,
+        searchPrice: row.structuredDisplayPrice?.primaryLine?.accessibilityLabel || null,
+      },
+    }));
+  }
+  try {
+    const result = await runTripPlanner({ wishlistUrl, location, checkin, checkout, adults, children, infants, pets, maxCandidates, budgetTotal, candidates });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], isError: false };
+  } catch (error) {
+    if (candidates.length && error instanceof AirbnbBrowserError) {
+      const checkedAt = new Date().toISOString();
+      const fallback = {
+        schema: "lookup-scaffold/v1",
+        source: "location",
+        status: "browser_unavailable",
+        checkedAt,
+        rows: candidates.map((candidate, index) => ({
+          rank: index + 1,
+          source: { name: "Airbnb", url: candidate.url },
+          candidate: { label: candidate.title, attributes: candidate.attributes },
+          price: { subtotal: null, fees: [], taxes: [], total: null, currency: null },
+          availability: { status: "available", window: { checkin, checkout } },
+          ranking: { score: null, reasons: [], tradeoffs: [] },
+          quoteStatus: "unknown",
+          checkedAt,
+          evidence: [{ kind: "search", label: "Airbnb dated search result", url: candidate.url }],
+          caveats: ["Authenticated browser quote unavailable; search-card price is not a full total."],
+        })),
+        caveats: [error.message],
+      };
+      return { content: [{ type: "text", text: JSON.stringify(fallback, null, 2) }], isError: false };
+    }
+    const message = error instanceof AirbnbBrowserError ? error.message : "Airbnb trip search failed";
+    return { content: [{ type: "text", text: JSON.stringify({ error: message }, null, 2) }], isError: true };
+  }
+}
+
 // Server setup
 const server = new Server(
   {
@@ -899,6 +1007,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "airbnb_listing_details": {
         result = await handleAirbnbListingDetails(request.params.arguments);
+        break;
+      }
+
+      case "airbnb_trip_search": {
+        result = await handleAirbnbTripSearch(request.params.arguments);
         break;
       }
 

@@ -35,7 +35,9 @@
       "env": {
         "NODE_ENV": "production",
         "IGNORE_ROBOTS_TXT": "${user_config.ignore_robots_txt}",
-        "DISABLE_GEOCODING": "${user_config.disable_geocoding}"
+        "DISABLE_GEOCODING": "${user_config.disable_geocoding}",
+        "AIRBNB_CDP_URL": "${user_config.airbnb_cdp_url}",
+        "AIRBNB_BROWSER_HELPER": "${user_config.airbnb_browser_helper}"
       }
     }
   },
@@ -47,6 +49,10 @@
     {
       "name": "airbnb_listing_details",
       "description": "Get detailed information about a specific Airbnb listing including amenities, policies, location details, and highlights."
+    },
+    {
+      "name": "airbnb_trip_search",
+      "description": "Plan and rank Airbnb stays from a destination or wishlist with dated availability and best-available pre-submit pricing."
     }
   ],
   "tools_generated": false,
@@ -63,6 +69,20 @@
     }
   },
   "user_config": {
+    "airbnb_browser_helper": {
+      "type": "string",
+      "title": "Trip planner Airbnb helper",
+      "description": "Path to the ecosystem trip-planner Airbnb CDP helper.",
+      "default": "~/Development/homelab-agents/skills/trip-planner/scripts/airbnb-cdp.mjs",
+      "required": false
+    },
+    "airbnb_cdp_url": {
+      "type": "string",
+      "title": "Airbnb Chrome debugging URL",
+      "description": "Loopback URL for the dedicated authenticated Airbnb Chrome profile.",
+      "default": "http://127.0.0.1:9226",
+      "required": false
+    },
     "ignore_robots_txt": {
       "type": "boolean",
       "title": "Ignore robots.txt",

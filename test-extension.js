@@ -104,7 +104,7 @@ class MCPTester {
       });
       
       // Validate expected tools
-      const expectedTools = ['airbnb_search', 'airbnb_listing_details'];
+      const expectedTools = ['airbnb_search', 'airbnb_listing_details', 'airbnb_trip_search'];
       const foundTools = tools.map(t => t.name);
       
       for (const expectedTool of expectedTools) {
@@ -195,6 +195,35 @@ class MCPTester {
       return true;
     } catch (error) {
       console.error('❌ airbnb_listing_details test failed:', error.message);
+      return false;
+    }
+  }
+
+  async testTripSearchTool() {
+    console.log('\n🧭 Testing airbnb_trip_search tool...');
+    try {
+      const response = await this.sendRequest('tools/call', {
+        name: 'airbnb_trip_search',
+        arguments: {
+          location: 'Lake Tahoe, California',
+          checkin: '2026-07-30',
+          checkout: '2026-08-02',
+          adults: 4,
+          pets: 1,
+          maxCandidates: 2
+        }
+      });
+      if (response.error) throw new Error(`Server error: ${response.error.message}`);
+      const result = JSON.parse(response.result?.content?.[0]?.text || '{}');
+      if (result.schema !== 'lookup-scaffold/v1') throw new Error('Missing lookup-scaffold/v1 result');
+      if (!Array.isArray(result.rows) || result.rows.length === 0) throw new Error('Trip search returned no rows');
+      if (!result.rows.every(row => ['exact', 'estimated', 'unknown'].includes(row.quoteStatus))) {
+        throw new Error('Invalid quote status');
+      }
+      console.log(`✅ Trip search returned ${result.rows.length} normalized rows (${result.status})`);
+      return true;
+    } catch (error) {
+      console.error('❌ airbnb_trip_search test failed:', error.message);
       return false;
     }
   }
@@ -293,6 +322,7 @@ class MCPTester {
         () => this.testListTools(),
         () => this.testSearchTool(),
         () => this.testListingDetailsTool(),
+        () => this.testTripSearchTool(),
         () => this.testGeocoding(),
       ];
       
