@@ -169,7 +169,21 @@ const AIRBNB_TRIP_SEARCH_TOOL: Tool = {
       maxCandidates: { type: "number", minimum: 1, maximum: 25, description: "Maximum candidates to quote; defaults to 10" },
       propertyType: { type: "string", enum: ["entire_home", "private_room", "shared_room", "hotel_room"], description: "Property type for destination discovery; defaults to any" }
     },
-    required: ["checkin", "checkout", "adults"]
+    required: ["checkin", "checkout", "adults"],
+    oneOf: [
+      {
+        required: ["location"],
+        not: { anyOf: [{ required: ["wishlistUrl"] }, { required: ["listingUrls"] }] }
+      },
+      {
+        required: ["wishlistUrl"],
+        not: { anyOf: [{ required: ["location"] }, { required: ["listingUrls"] }] }
+      },
+      {
+        required: ["listingUrls"],
+        not: { anyOf: [{ required: ["location"] }, { required: ["wishlistUrl"] }] }
+      }
+    ]
   }
 };
 

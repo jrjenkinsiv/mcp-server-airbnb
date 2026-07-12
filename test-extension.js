@@ -8,6 +8,8 @@
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -111,6 +113,28 @@ class MCPTester {
         if (!foundTools.includes(expectedTool)) {
           throw new Error(`Missing expected tool: ${expectedTool}`);
         }
+      }
+
+      const tripSearch = tools.find(t => t.name === 'airbnb_trip_search');
+      const schema = tripSearch?.inputSchema;
+      if (!schema?.properties?.listingUrls) {
+        throw new Error('airbnb_trip_search schema is missing listingUrls');
+      }
+      if (schema.properties.listingUrls.minItems !== 1 || schema.properties.listingUrls.maxItems !== 25) {
+        throw new Error('airbnb_trip_search listingUrls schema must declare 1-25 entries');
+      }
+      if (!schema.properties.listingUrls.items?.pattern?.includes('/rooms/')) {
+        throw new Error('airbnb_trip_search listingUrls schema must restrict entries to room URLs');
+      }
+      const sourceFields = ['location', 'wishlistUrl', 'listingUrls'];
+      for (const field of sourceFields) {
+        if (!schema.properties[field]) {
+          throw new Error(`airbnb_trip_search schema is missing source field: ${field}`);
+        }
+      }
+      const oneOfRequired = (schema.oneOf || []).map(branch => branch.required?.[0]).sort();
+      if (JSON.stringify(oneOfRequired) !== JSON.stringify([...sourceFields].sort())) {
+        throw new Error('airbnb_trip_search schema must require exactly one source mode via oneOf');
       }
       
       return true;
@@ -389,6 +413,137 @@ class MCPTester {
     }
   }
 
+  // Uses a throwaway helper script to prove explicit-listing mode sends one
+  // bounded browser-helper `run` invocation for the whole listingUrls batch and
+  // that URL query strings/fragments/trailing slashes are stripped before the
+  // helper receives candidates.
+  async testTripSearchExplicitListingSingleHelperRun() {
+    console.log('\nTesting airbnb_trip_search explicit-listing helper batching + normalization...');
+    const tempDir = mkdtempSync(join(tmpdir(), 'airbnb-helper-audit-'));
+    const helperPath = join(tempDir, 'fake-airbnb-helper.mjs');
+    const helperLog = join(tempDir, 'helper-calls.jsonl');
+    writeFileSync(helperPath, `#!/usr/bin/env node
+import { appendFileSync } from 'fs';
+const command = process.argv[2];
+let body = '';
+for await (const chunk of process.stdin) body += chunk;
+const input = JSON.parse(body || '{}');
+appendFileSync(process.env.HELPER_LOG, JSON.stringify({ command, args: process.argv.slice(2), input }) + '\\n');
+const checkedAt = new Date().toISOString();
+console.log(JSON.stringify({
+  schema: 'lookup-scaffold/v1',
+  source: 'location',
+  status: 'ok',
+  checkedAt,
+  rows: (input.candidates || []).map((candidate, index) => ({
+    rank: index + 1,
+    source: { name: 'Airbnb', url: candidate.url },
+    candidate: { label: candidate.title || 'Airbnb listing', attributes: candidate.attributes || {} },
+    price: { subtotal: null, fees: [], taxes: [], total: null, currency: null },
+    availability: { status: 'unknown', window: { checkin: input.checkin, checkout: input.checkout } },
+    ranking: { score: null, reasons: [], tradeoffs: [] },
+    quoteStatus: index === 0 ? 'estimated' : 'unknown',
+    checkedAt,
+    evidence: [{ kind: 'fixture', label: 'fake helper', url: candidate.url }],
+    caveats: []
+  })),
+  caveats: []
+}));
+`);
+    const throwaway = spawn('node', [SERVER_PATH, '--ignore-robots-txt'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        IGNORE_ROBOTS_TXT: 'true',
+        AIRBNB_BROWSER_HELPER: helperPath,
+        HELPER_LOG: helperLog,
+      },
+    });
+    throwaway.stderr.on('data', () => {});
+    try {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      const listingUrls = [
+        'https://www.airbnb.com/rooms/1234567890/?adults=8#photos',
+        'https://airbnb.com/rooms/9876543210?redirect=https://evil.example.com/rooms/1',
+      ];
+      const response = await new Promise((resolve, reject) => {
+        const request = {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: {
+            name: 'airbnb_trip_search',
+            arguments: {
+              listingUrls,
+              checkin: '2026-09-14',
+              checkout: '2026-09-17',
+              adults: 2,
+            },
+          },
+        };
+        const timer = setTimeout(() => reject(new Error('helper batching call timed out')), 20000);
+        let out = '';
+        const onData = (data) => {
+          out += data.toString();
+          for (const line of out.split('\n').filter(Boolean)) {
+            try {
+              const parsed = JSON.parse(line);
+              if (parsed.id === request.id) { clearTimeout(timer); throwaway.stdout.off('data', onData); resolve(parsed); return; }
+            } catch { /* incomplete line */ }
+          }
+        };
+        throwaway.stdout.on('data', onData);
+        throwaway.stdin.write(JSON.stringify(request) + '\n');
+      });
+      if (response.error) throw new Error(`Server error: ${response.error.message}`);
+      const result = JSON.parse(response.result?.content?.[0]?.text || '{}');
+      if (result.schema !== 'lookup-scaffold/v1') throw new Error('Missing lookup-scaffold/v1 result');
+      if (result.source !== 'listingUrls') throw new Error(`Expected top-level source "listingUrls", got "${result.source}"`);
+      const expectedUrls = ['https://www.airbnb.com/rooms/1234567890', 'https://airbnb.com/rooms/9876543210'];
+      const resultUrls = (result.rows || []).map(row => row.source?.url);
+      if (JSON.stringify(resultUrls) !== JSON.stringify(expectedUrls)) throw new Error(`Rows were not normalized: ${JSON.stringify(resultUrls)}`);
+      const calls = readFileSync(helperLog, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+      if (calls.length !== 1) throw new Error(`Expected one helper invocation, saw ${calls.length}`);
+      const call = calls[0];
+      if (call.command !== 'run') throw new Error(`Expected helper command "run", got "${call.command}"`);
+      if (call.input.maxCandidates !== 2) throw new Error(`Expected bounded maxCandidates=2, got ${call.input.maxCandidates}`);
+      const candidateUrls = (call.input.candidates || []).map(candidate => candidate.url);
+      if (JSON.stringify(candidateUrls) !== JSON.stringify(expectedUrls)) throw new Error(`Helper candidates were not normalized: ${JSON.stringify(candidateUrls)}`);
+      console.log(`PASS: listingUrls batch used one helper run with ${candidateUrls.length} normalized candidates`);
+      return true;
+    } catch (error) {
+      console.error('FAIL: explicit-listing helper batching test failed:', error.message);
+      return false;
+    } finally {
+      throwaway.kill('SIGTERM');
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  // Read-only audit for this MCP boundary: trip search is routed only through
+  // the helper's `run` command. Wishlist mutation remains isolated in
+  // airbnb_wishlist_manage and is never invoked by airbnb_trip_search.
+  async testTripSearchNoBookingCommandAudit() {
+    console.log('\nTesting airbnb_trip_search read-only/no-booking command audit...');
+    const browserSource = readFileSync(join(__dirname, 'browser.ts'), 'utf8');
+    const indexSource = readFileSync(join(__dirname, 'index.ts'), 'utf8');
+    const runTripPlannerMatch = browserSource.match(/export async function runTripPlanner[\s\S]*?runBrowserHelper\("([^"]+)"/);
+    const manageWishlistMatch = browserSource.match(/export async function manageWishlist[\s\S]*?runBrowserHelper\("([^"]+)"/);
+    const handleTripSearchBody = indexSource.match(/async function handleAirbnbTripSearch[\s\S]*?\n}\n\nasync function handleAirbnbWishlistManage/);
+    const tripSearchTool = indexSource.match(/const AIRBNB_TRIP_SEARCH_TOOL[\s\S]*?const AIRBNB_WISHLIST_MANAGE_TOOL/);
+    if (!runTripPlannerMatch || runTripPlannerMatch[1] !== 'run') throw new Error('runTripPlanner must use helper command "run"');
+    if (!manageWishlistMatch || manageWishlistMatch[1] !== 'wishlist-manage') throw new Error('manageWishlist must remain isolated to helper command "wishlist-manage"');
+    if (!handleTripSearchBody) throw new Error('Could not locate handleAirbnbTripSearch body for audit');
+    if (/manageWishlist|wishlist-manage|Reserve|payment|booking/i.test(handleTripSearchBody[0])) {
+      throw new Error('airbnb_trip_search body contains mutation or booking vocabulary');
+    }
+    if (!/readOnlyHint:\s*true/.test(tripSearchTool?.[0] || '') || !/destructiveHint:\s*false/.test(tripSearchTool?.[0] || '')) {
+      throw new Error('airbnb_trip_search tool annotations must remain read-only and non-destructive');
+    }
+    console.log('PASS: airbnb_trip_search routes only to helper run and remains read-only/non-destructive');
+    return true;
+  }
+
   async stopServer() {
     if (this.server && !this.server.killed) {
       console.log('\n🛑 Stopping server...');
@@ -488,6 +643,8 @@ class MCPTester {
         () => this.testTripSearchListingUrlAllowlist(),
         () => this.testTripSearchListingUrlBoundaryAccepted(),
         () => this.testTripSearchExplicitListingFixture(),
+        () => this.testTripSearchExplicitListingSingleHelperRun(),
+        () => this.testTripSearchNoBookingCommandAudit(),
         () => this.testGeocoding(),
       ];
       
